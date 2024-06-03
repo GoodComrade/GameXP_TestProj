@@ -10,61 +10,80 @@
 #include <windows.h>
 #include <tuple>
 #include <conio.h>
+#include <locale>
+#include <codecvt>
 
 // Глобальная критическая секция для синхронизации доступа к векторам
 CRITICAL_SECTION criticalSection;
 
 // Класс с 64-битным полем и функцией сканирования файлов
-class MyClass {
+class ThreadClass 
+{
 public:
-    uint64_t number;
+    uint64_t ThreadID;
 
-    MyClass(uint64_t num) : number(num) {}
+    ThreadClass(uint64_t num) : ThreadID(num) {}
 
-    void scanAndLog(HANDLE stopEvent, std::vector<std::wstring>& txtFiles, std::vector<std::wstring>& accessedFiles) const {
+    void scanAndLog(HANDLE stopEvent, std::vector<std::wstring>& txtFiles, std::vector<std::wstring>& accessedFiles) const 
+    {
         // Получаем текущий каталог
         wchar_t currentPath[MAX_PATH];
         DWORD pathLen = GetCurrentDirectoryW(MAX_PATH, currentPath);
-        if (pathLen == 0 || pathLen > MAX_PATH) {
+
+        if (pathLen == 0 || pathLen > MAX_PATH) 
+        {
             std::wcerr << L"Failed to get current directory." << std::endl;
             return;
         }
 
         // Добавляем шаблон поиска файлов
-        std::wstring searchPattern = std::wstring(currentPath) + L"\\*.txt";
-
         // Используем Windows API для поиска файлов с расширением *.txt
+        std::wstring searchPattern = std::wstring(currentPath) + L"\\*.txt";
         WIN32_FIND_DATAW findFileData;
         HANDLE hFind = FindFirstFileW(searchPattern.c_str(), &findFileData);
 
-        if (hFind != INVALID_HANDLE_VALUE) {
-            do {
-                if (WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
+        if (hFind != INVALID_HANDLE_VALUE) 
+        {
+            do 
+            {
+                if (WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) 
+                {
                     FindClose(hFind);
                     return;  // Если событие установлено, прекращаем выполнение
                 }
 
+                std::wstring logFileName = L"files";
+
                 // Проверяем на корректность переменную findFileData
                 if (findFileData.dwFileAttributes != INVALID_FILE_ATTRIBUTES &&
-                    !(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                    !(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) 
+                {
                     // Добавляем имя файла в вектор
                     std::wstring fileName(findFileData.cFileName);
 
                     // Проверяем, обрабатывался ли файл другим потоком
-                    if (std::find(accessedFiles.begin(), accessedFiles.end(), fileName) == accessedFiles.end()) {
+                    if (std::find(accessedFiles.begin(), accessedFiles.end(), fileName) == accessedFiles.end() &&
+                        fileName != logFileName)
+                    {
                         EnterCriticalSection(&criticalSection);
-                        txtFiles.push_back(fileName + L" | Thread ID: " + std::to_wstring(number)); // Записываем имя файла и значение поля number в лог
+
+                        txtFiles.push_back(fileName + L" | Thread ID: " + std::to_wstring(ThreadID)); // Записываем имя файла и идентификатор нашедшего его треда в лог-вектор
                         accessedFiles.push_back(fileName); // Помечаем файл как обработанный
+
                         LeaveCriticalSection(&criticalSection);
 
                         // Удаляем файл после записи в лог
                         std::wstring filePath = std::wstring(currentPath) + L"\\" + fileName;
-                        if (!DeleteFileW(filePath.c_str())) {
+
+                        if (!DeleteFileW(filePath.c_str())) 
+                        {
                             std::wcerr << L"Failed to delete file: " << fileName << std::endl;
                         }
                     }
                 }
-            } while (FindNextFileW(hFind, &findFileData) != 0);
+            } 
+            while (FindNextFileW(hFind, &findFileData) != 0);
+
             FindClose(hFind);
         }
 
@@ -74,100 +93,89 @@ public:
 };
 
 // Функция, которая будет выполняться в потоке
-DWORD WINAPI threadFunction(LPVOID param) {
-    auto* params = static_cast<std::tuple<MyClass*, HANDLE, std::vector<std::wstring>*, std::vector<std::wstring>* >*>(param);
-    MyClass* obj = std::get<0>(*params);
+DWORD WINAPI threadFunction(LPVOID param) 
+{
+    auto* params = static_cast<std::tuple<ThreadClass*, HANDLE, std::vector<std::wstring>*, std::vector<std::wstring>* >*>(param);
+
+    ThreadClass* obj = std::get<0>(*params);
     HANDLE stopEvent = std::get<1>(*params);
     std::vector<std::wstring>* txtFiles = std::get<2>(*params);
     std::vector<std::wstring>* accessedFiles = std::get<3>(*params);
+
     obj->scanAndLog(stopEvent, *txtFiles, *accessedFiles);
+
     return 0;
 }
 
-// Функция генерации случайного 64-битного числа
-uint64_t generateRandomNumber() {
+uint64_t generateRandomThreadID() 
+{
     std::random_device rd;
     std::mt19937_64 gen(rd());
     std::uniform_int_distribution<uint64_t> dis;
     return dis(gen);
 }
 
-int main() {
+int main() 
+{
+    // Настроим локали, что бы в итоговом логе так же отображались файлы с кириллическими символами в названии(вдруг пригодится)
+    std::locale::global(std::locale("ru_RU.utf8"));
+    std::wcout.imbue(std::locale());
+    std::wcin.imbue(std::locale());
+
     // Инициализация критической секции
     InitializeCriticalSection(&criticalSection);
 
     std::cout << "Application is running. Press any key to stop." << std::endl;
 
-    while (!_kbhit()) { // Пока не нажата клавиша
-        // Генерация случайных 64-битных чисел
-        uint64_t randomNum1 = generateRandomNumber();
-        uint64_t randomNum2 = generateRandomNumber();
+    while (!_kbhit()) // Пока не нажата клавиша
+    { 
+        ThreadClass obj1(generateRandomThreadID());
+        ThreadClass obj2(generateRandomThreadID());
 
-        // Создаем два объекта класса с переданными значениями
-        MyClass obj1(randomNum1);
-        MyClass obj2(randomNum2);
-
-        // Создаем события для остановки потоков
         HANDLE stopEvent1 = CreateEvent(nullptr, TRUE, FALSE, nullptr);
         HANDLE stopEvent2 = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 
-        // Вектор для хранения имен файлов
+        // Вектора для записи имен найденных файлов на каждый поток
         std::vector<std::wstring> txtFiles1;
         std::vector<std::wstring> txtFiles2;
 
-        // Вектор для хранения имен файлов, к которым уже получен доступ
+        // Вектор для хранения имен файлов, к которым уже получен доступ в любом из потоков
         std::vector<std::wstring> accessedFiles;
 
-        // Создаем два потока
-        std::tuple<MyClass*, HANDLE, std::vector<std::wstring>*, std::vector<std::wstring>* > param1 = { &obj1, stopEvent1, &txtFiles1, &accessedFiles };
-        std::tuple<MyClass*, HANDLE, std::vector<std::wstring>*, std::vector<std::wstring>* > param2 = { &obj2, stopEvent2, &txtFiles2, &accessedFiles };
+        // Пакуем параметры для экземпляров потока
+        std::tuple<ThreadClass*, HANDLE, std::vector<std::wstring>*, std::vector<std::wstring>* > param1 = { &obj1, stopEvent1, &txtFiles1, &accessedFiles };
+        std::tuple<ThreadClass*, HANDLE, std::vector<std::wstring>*, std::vector<std::wstring>* > param2 = { &obj2, stopEvent2, &txtFiles2, &accessedFiles };
 
-        HANDLE thread1 = CreateThread(
-            nullptr,        // Дескриптор атрибута безопасности
-            0,              // Начальный размер стека
-            threadFunction, // Функция потока
-            &param1,        // Аргумент для потока
-            0,              // Флаги создания
-            nullptr         // Идентификатор потока
-        );
+        // Создаем потоки с заранее заготовленными параметрами
+        HANDLE thread1 = CreateThread(nullptr, 0, threadFunction, &param1, 0, nullptr);
+        HANDLE thread2 = CreateThread(nullptr, 0, threadFunction, &param2, 0, nullptr);
 
-        HANDLE thread2 = CreateThread(
-            nullptr,        // Дескриптор атрибута безопасности
-            0,              // Начальный размер стека
-            threadFunction, // Функция потока
-            &param2,        // Аргумент для потока
-            0,              // Флаги создания
-            nullptr         // Идентификатор потока
-        );
-
-        // Ожидаем завершения первого потока
+        // Ожидаем завершения самого быстрого потока
         HANDLE events[2] = { stopEvent1, stopEvent2 };
         DWORD waitResult = WaitForMultipleObjects(2, events, TRUE, INFINITE);
 
-        // Запись найденных файлов в *.log файл
-        std::wofstream logFile(L"files.log", std::ios_base::app);
-        EnterCriticalSection(&criticalSection);
+        std::wofstream logFile(L"files.log", std::ios_base::app); //
+                                                                  //
+        EnterCriticalSection(&criticalSection);                   //
+                                                                  //
+        if (waitResult == WAIT_OBJECT_0)                          //
+        {                                                         //
+            for (const auto& file : txtFiles1)                    //
+                logFile << file << std::endl;                     // Запись найденных файлов из самого быстрого потока в *.log файл
+        }                                                         //
+        else if (waitResult == WAIT_OBJECT_0 + 1)                 //
+        {                                                         //
+            for (const auto& file : txtFiles2)                    //
+                logFile << file << std::endl;                     //
+        }                                                         //
+                                                                  //
+        logFile << std::endl;                                     //
+                                                                  //
+        LeaveCriticalSection(&criticalSection);                   //
 
-        if (waitResult == WAIT_OBJECT_0)
-        {
-            for (const auto& file : txtFiles1)
-                logFile << file << std::endl;
-        }
-        else if (waitResult == WAIT_OBJECT_0 + 1)
-        {
-            for (const auto& file : txtFiles2)
-                logFile << file << std::endl;
-        }
-
-        logFile << std::endl;
-
-        LeaveCriticalSection(&criticalSection);
-
-        // Закрываем потоки
+        // Закрываем потоки и события
         CloseHandle(thread1);
         CloseHandle(thread2);
-
-        // Закрываем события
         CloseHandle(stopEvent1);
         CloseHandle(stopEvent2);
 
